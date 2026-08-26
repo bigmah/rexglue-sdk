@@ -497,18 +497,14 @@ void ReXApp::OnKeyDown(ui::KeyEvent& e) {
 
 void ReXApp::OnClosing(ui::UIEvent& e) {
   (void)e;
-  REXLOG_INFO("Window closing, shutting down...");
   shutting_down_.store(true, std::memory_order_release);
-  if (runtime_ && runtime_->kernel_state()) {
-    runtime_->kernel_state()->TerminateTitle();
-  }
-  // Hard-exit rather than run subsystem teardown, which can deadlock on a host
-  // lock still held by a straggler TerminateTitle left running. Flush (not
-  // ShutdownLogging, which frees loggers a straggler may still use); the OS
-  // reclaims the rest.
-  REXLOG_INFO("Title terminated; hard-exiting process.");
-  rex::FlushLogging();
-  std::_Exit(0);
+  // This path already deliberately relies on the OS to reclaim the runtime:
+  // guest threads do not have safe-point polls, so graceful subsystem teardown
+  // can deadlock. Do not try to stop the title or flush the asynchronous logger
+  // before the hard exit either. Both operations acquire locks that a guest or
+  // GPU thread may hold, which can wedge the close callback before it reaches
+  // _Exit and leave the user needing to force-quit the app.
+  std::_Exit(EXIT_SUCCESS);
 }
 
 bool ReXApp::OnCloseRequested(ui::UIEvent& e) {
