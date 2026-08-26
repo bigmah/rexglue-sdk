@@ -75,7 +75,14 @@ struct FPSCRPlatform {
     return csr;
   }
 
-  static inline void setcsr(u32 csr) noexcept { __asm__ __volatile__("msr fpcr, %0" : : "r"(csr)); }
+  static inline void setcsr(u32 csr) noexcept {
+    // Widen before the asm: msr targets a system register, so the operand is
+    // always an X register. Passing a u32 under "r" leaves the upper half
+    // undefined (and warns under -Wasm-operand-widths); clang's suggested %w0
+    // is not a valid encoding here. Mirrors getcsr(), which already uses u64.
+    u64 value = csr;
+    __asm__ __volatile__("msr fpcr, %0" : : "r"(value));
+  }
 
   static inline void InitHostExceptions(u32& csr) noexcept {
     csr &= ~ExceptionMask;  // Clear enable bits to disable exceptions
