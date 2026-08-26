@@ -81,6 +81,11 @@ function(rexglue_configure_target target_name)
         ${REXGLUE_SHARE_DIR}/windowed_app_main_sdl.cpp
         ${REXGLUE_SHARE_DIR}/rex_app.cpp)
 
+    # Those sources (and rex/rex_app.h, which consumers include) pull in imgui
+    # headers. rexui exposes imgui::imgui PUBLIC, so the target needs it; the
+    # generated glue links only rex::runtime, which does not carry rexui.
+    target_link_libraries(${target_name} PRIVATE rex::ui)
+
     target_compile_definitions(${target_name} PRIVATE
         REXGLUE_BUILD_CONFIG="$<CONFIG>")
 
