@@ -53,7 +53,11 @@ if (REXGLUE_ENABLE_FIDELITYFX AND
 endif()
 
 # Root of the SDK source tree
-set(REXGLUE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+# CACHE INTERNAL, not a plain set(): rexglue_configure_target() runs in the
+# consuming project's directory scope, which a directory-scoped variable does
+# not reach. _rexglue_stage_macos_vulkan_runtime() dereferences this to locate
+# the MoltenVK ICD, and would otherwise resolve "/cmake/MoltenVK_icd.json".
+set(REXGLUE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}" CACHE INTERNAL "ReXGlue SDK source root")
 
 # SDK install support
 include(GNUInstallDirs)
