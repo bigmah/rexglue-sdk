@@ -110,7 +110,12 @@ function(rex_resolve_version out_var)
     cmake_parse_arguments(ARG "" "${one_value}" "" ${ARGN})
 
     if(NOT ARG_SOURCE_DIR)
-        set(ARG_SOURCE_DIR "${CMAKE_SOURCE_DIR}")
+        # CMAKE_CURRENT_SOURCE_DIR, not CMAKE_SOURCE_DIR: this resolves the
+        # SDK's own version, and CMAKE_SOURCE_DIR is the top-level project.
+        # Those coincide in a standalone build but diverge under
+        # add_subdirectory(), where it would describe the consumer's tags -
+        # failing the floor check outright if the consumer's tags are ahead.
+        set(ARG_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
     endif()
 
     find_program(GIT_EXECUTABLE git)
