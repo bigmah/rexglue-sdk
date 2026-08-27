@@ -81,10 +81,13 @@ function(rexglue_configure_target target_name)
         ${REXGLUE_SHARE_DIR}/windowed_app_main_sdl.cpp
         ${REXGLUE_SHARE_DIR}/rex_app.cpp)
 
-    # Those sources (and rex/rex_app.h, which consumers include) pull in imgui
-    # headers. rexui exposes imgui::imgui PUBLIC, so the target needs it; the
-    # generated glue links only rex::runtime, which does not carry rexui.
-    target_link_libraries(${target_name} PRIVATE rex::ui)
+    # Those sources (and rex/rex_app.h, which consumers include) pull in ImGui
+    # headers. The runtime dylib already contains rexui and ImGui; linking the
+    # rexui OBJECT library into the host a second time duplicates all UI global
+    # state (including every cvar registrar) and makes calls cross two copies of
+    # the same implementation. Propagate only the header search paths here.
+    target_include_directories(${target_name} PRIVATE
+        $<TARGET_PROPERTY:imgui::imgui,INTERFACE_INCLUDE_DIRECTORIES>)
 
     target_compile_definitions(${target_name} PRIVATE
         REXGLUE_BUILD_CONFIG="$<CONFIG>")
