@@ -12,6 +12,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -120,6 +121,9 @@ class CommandProcessor {
 
   void UpdateWritePointer(uint32_t value);
 
+  uint64_t GetGuestGpuWritebackGeneration() const;
+  bool WaitForGuestGpuWriteback(uint64_t observed_generation, uint32_t timeout_us);
+
   void ExecutePacket(uint32_t ptr, uint32_t count);
 
   bool is_paused() const { return paused_; }
@@ -168,6 +172,8 @@ class CommandProcessor {
   virtual void MakeCoherent();
   virtual void PrepareForWait();
   virtual void ReturnFromWait();
+
+  void NotifyGuestGpuWriteback();
 
   uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index);
   virtual void OnPrimaryBufferEnd() {}
@@ -254,6 +260,13 @@ class CommandProcessor {
 
   std::unique_ptr<rex::thread::Event> write_ptr_index_event_;
   std::atomic<uint32_t> write_ptr_index_;
+
+  // Protects a monotonic generation rather than any particular guest address:
+  // EVENT_WRITE_SHD is the Xenos mechanism used for fence writebacks, and
+  // multiple guest threads may be waiting on different fence values at once.
+  mutable std::mutex guest_gpu_writeback_mutex_;
+  std::condition_variable guest_gpu_writeback_condition_;
+  uint64_t guest_gpu_writeback_generation_ = 0;
 
   // Some titles submit writes beyond the emulated register file range in PM4
   // packets. Preserve these values so dependent packet logic can still observe

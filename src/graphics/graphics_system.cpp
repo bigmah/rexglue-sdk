@@ -288,6 +288,16 @@ void GraphicsSystem::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_siz
   command_processor_->EnableReadPointerWriteBack(ptr, block_size_log2);
 }
 
+uint64_t GraphicsSystem::GetGuestGpuWritebackGeneration() const {
+  return command_processor_ ? command_processor_->GetGuestGpuWritebackGeneration() : 0;
+}
+
+bool GraphicsSystem::WaitForGuestGpuWriteback(uint64_t observed_generation,
+                                              uint32_t timeout_us) {
+  return command_processor_ &&
+         command_processor_->WaitForGuestGpuWriteback(observed_generation, timeout_us);
+}
+
 void GraphicsSystem::SetInterruptCallback(uint32_t callback, uint32_t user_data) {
   interrupt_callback_ = callback;
   interrupt_callback_data_ = user_data;

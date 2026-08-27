@@ -71,6 +71,18 @@ class IGraphicsSystem {
     (void)block_size_log2;
   }
 
+  // Guest command streams use memory writebacks as lightweight GPU fences.
+  // Titles that wait on those fences can use this generation to sleep until
+  // the command processor performs another writeback instead of polling the
+  // guest memory continuously. The timeout keeps title-specific callers safe
+  // during shutdown and from accidentally waiting on the command thread.
+  virtual uint64_t GetGuestGpuWritebackGeneration() const { return 0; }
+  virtual bool WaitForGuestGpuWriteback(uint64_t observed_generation, uint32_t timeout_us) {
+    (void)observed_generation;
+    (void)timeout_us;
+    return false;
+  }
+
   // Persistent shader/pipeline storage under the cache root. Default: none.
   virtual void InitializeShaderStorage(const std::filesystem::path& cache_root, uint32_t title_id,
                                        bool blocking) {

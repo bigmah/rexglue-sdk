@@ -150,6 +150,7 @@ bool CommandProcessor::Initialize() {
 void CommandProcessor::Shutdown() {
   worker_running_ = false;
   write_ptr_index_event_->Set();
+  NotifyGuestGpuWriteback();
   worker_thread_->Wait(0, 0, 0, nullptr);
   worker_thread_.reset();
 }
@@ -246,6 +247,7 @@ void CommandProcessor::WorkerThreadMain() {
     if (read_ptr_writeback_ptr_) {
       memory::store_and_swap<uint32_t>(memory_->TranslatePhysical(read_ptr_writeback_ptr_),
                                        read_ptr_index_);
+      NotifyGuestGpuWriteback();
     }
 
     // FIXME: We're supposed to process the WAIT_UNTIL register at this point,
@@ -330,6 +332,29 @@ void CommandProcessor::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_s
 void CommandProcessor::UpdateWritePointer(uint32_t value) {
   write_ptr_index_ = value;
   write_ptr_index_event_->Set();
+}
+
+uint64_t CommandProcessor::GetGuestGpuWritebackGeneration() const {
+  std::lock_guard lock(guest_gpu_writeback_mutex_);
+  return guest_gpu_writeback_generation_;
+}
+
+bool CommandProcessor::WaitForGuestGpuWriteback(uint64_t observed_generation,
+                                                uint32_t timeout_us) {
+  std::unique_lock lock(guest_gpu_writeback_mutex_);
+  return guest_gpu_writeback_condition_.wait_for(
+      lock, std::chrono::microseconds(timeout_us), [this, observed_generation]() {
+        return !worker_running_.load(std::memory_order_relaxed) ||
+               guest_gpu_writeback_generation_ != observed_generation;
+      });
+}
+
+void CommandProcessor::NotifyGuestGpuWriteback() {
+  {
+    std::lock_guard lock(guest_gpu_writeback_mutex_);
+    ++guest_gpu_writeback_generation_;
+  }
+  guest_gpu_writeback_condition_.notify_all();
 }
 
 uint32_t CommandProcessor::ReadRegisterValue(uint32_t index) const {
@@ -1215,6 +1240,7 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_SHD(memory::RingBuffer* re
   address &= ~0x3;
   data_value = GpuSwap(data_value, endianness);
   memory::store(memory_->TranslatePhysical(address), data_value);
+  NotifyGuestGpuWriteback();
   return true;
 }
 

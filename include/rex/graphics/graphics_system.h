@@ -73,6 +73,8 @@ class GraphicsSystem : public system::IGraphicsSystem {
 
   void InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) override;
   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2) override;
+  uint64_t GetGuestGpuWritebackGeneration() const override;
+  bool WaitForGuestGpuWriteback(uint64_t observed_generation, uint32_t timeout_us) override;
 
   void SetInterruptCallback(uint32_t callback, uint32_t user_data) override;
   void DispatchInterruptCallback(uint32_t source, uint32_t cpu);

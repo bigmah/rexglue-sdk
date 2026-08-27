@@ -31,6 +31,11 @@ REXCVAR_DEFINE_INT32(window_height, 0, "UI/Window",
     .range(0, 8192)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_BOOL(high_pixel_density, true, "UI/Window",
+                    "On macOS, render the window at the display's full Retina backing-pixel "
+                    "density; other platforms retain their native DPI behavior")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 // kHotReload (default): Window::SetFullscreen can be applied live, so the
 // change callback registered in ReXApp::SetupPresentation keeps the window
 // in sync whenever this cvar is changed at runtime.

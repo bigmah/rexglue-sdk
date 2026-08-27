@@ -136,7 +136,17 @@ WindowSDL::~WindowSDL() {
 bool WindowSDL::OpenImpl() {
   // SDL window coordinates are physical pixels on Windows and X11. Cocoa
   // uses logical points and applies the backing scale itself.
-  SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN;
+  SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN;
+#if REX_PLATFORM_MAC
+  if (REXCVAR_GET(high_pixel_density)) {
+    flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
+  }
+#else
+  // Preserve the existing DPI behavior on platforms where SDL window
+  // coordinates are already physical pixels. The opt-out is specifically for
+  // avoiding an additional Retina backing-scale render on Cocoa.
+  flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
+#endif
 #if REX_PLATFORM_MAC
   int initial_width = int(GetDesiredLogicalWidth());
   int initial_height = int(GetDesiredLogicalHeight());
