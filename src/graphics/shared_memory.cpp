@@ -15,10 +15,20 @@
 
 #include <rex/assert.h>
 #include <rex/bit.h>
+#include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/graphics/shared_memory.h>
 #include <rex/math.h>
 #include <rex/memory.h>
+
+REXCVAR_DEFINE_INT32(
+    shared_memory_upload_coalesce_kb, 4096, "GPU",
+    "When guest memory has to be uploaded in the middle of a frame, also upload the "
+    "contiguous invalidated region around what was asked for, up to this many kilobytes. "
+    "Every upload has to interrupt the open render pass, which on a tile-based GPU stores "
+    "and reloads the whole render target, so uploading a dirtied buffer once beats uploading "
+    "it in per-draw slices. 0 uploads only what each draw asks for.")
+    .range(0, 262144);
 
 namespace rex::graphics {
 
@@ -453,6 +463,48 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
         append_upload_range(range_start, page_last + 1 - range_start);
       }
     }
+
+    // Each upload forces the command processor to break the render pass that is
+    // open, and a broken render pass costs a full store and reload of the render
+    // target on a tile-based GPU. Draws walk a dirtied buffer a slice at a time,
+    // so uploading the whole contiguous dirty run now collapses what would
+    // otherwise be one break per draw into one break for the buffer. Only
+    // invalid pages are ever added, and pages the GPU itself wrote are marked
+    // valid, so widening can never overwrite GPU-produced data.
+    const uint32_t coalesce_kb = uint32_t(REXCVAR_GET(shared_memory_upload_coalesce_kb));
+    if (coalesce_kb && !upload_ranges_.empty()) {
+      const uint32_t page_count_total = kBufferSize >> page_size_log2_;
+      uint32_t coalesce_pages = (coalesce_kb << 10) >> page_size_log2_;
+      if (coalesce_pages) {
+        auto page_invalid = [this](uint32_t page) {
+          return !(system_page_flags_valid_[page >> 6] & (uint64_t(1) << (page & 63)));
+        };
+        std::vector<std::pair<uint32_t, uint32_t>> widened;
+        widened.reserve(upload_ranges_.size());
+        for (const std::pair<uint32_t, uint32_t>& upload_range : upload_ranges_) {
+          uint32_t first = upload_range.first;
+          uint32_t last = upload_range.first + upload_range.second;  // exclusive
+          uint32_t budget =
+              coalesce_pages > upload_range.second ? coalesce_pages - upload_range.second : 0;
+          uint32_t floor = widened.empty() ? 0 : widened.back().first + widened.back().second;
+          while (budget && first > floor && page_invalid(first - 1)) {
+            --first;
+            --budget;
+          }
+          while (budget && last < page_count_total && page_invalid(last)) {
+            ++last;
+            --budget;
+          }
+          if (!widened.empty() && widened.back().first + widened.back().second >= first) {
+            std::pair<uint32_t, uint32_t>& previous = widened.back();
+            previous.second = last - previous.first;
+          } else {
+            widened.emplace_back(first, last - first);
+          }
+        }
+        upload_ranges_.swap(widened);
+      }
+    }
   }
 
   COUNT_profile_set("gpu/shared_memory/request_ranges_count", uint32_t(count));
@@ -463,6 +515,15 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
 
   if (upload_ranges_.empty()) {
     return true;
+  }
+
+  // Widening above can reach past what was requested, so the backing memory for
+  // the extra pages has to exist too (a no-op where the whole buffer is resident).
+  for (const std::pair<uint32_t, uint32_t>& upload_range : upload_ranges_) {
+    if (!EnsureHostGpuMemoryAllocated(upload_range.first << page_size_log2_,
+                                      upload_range.second << page_size_log2_)) {
+      return false;
+    }
   }
 
   return UploadRanges(upload_ranges_);

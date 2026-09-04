@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string_view>
 
@@ -34,6 +36,81 @@
 #include <rex/stream.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
+
+// Optional per-frame timing trace, used for A/B performance work. Writing is
+// enabled only when REX_FRAMELOG names a file; otherwise this costs one
+// already-hot pointer test per swap. Only the command processor thread reaches
+// ExecutePacketType3_XE_SWAP, so plain (non-atomic) state is fine here.
+namespace rex::graphics {
+// Per-frame work counters for the frame trace. Only the command processor
+// thread touches these, so they need no synchronization.
+uint64_t g_frame_draws = 0;
+uint64_t g_frame_render_passes = 0;
+uint64_t g_frame_transfer_passes = 0;
+uint64_t g_frame_pass_resumes = 0;
+uint64_t g_frame_barrier_buf = 0;
+uint64_t g_frame_barrier_img = 0;
+uint64_t g_frame_pass_kpixels = 0;
+uint64_t g_frame_submissions = 0;
+}  // namespace rex::graphics
+
+namespace {
+struct SwapFrameLog {
+  std::FILE* file = nullptr;
+  uint64_t last_tick = 0;
+  uint64_t frequency = 0;
+  unsigned pending = 0;
+
+  SwapFrameLog() {
+    const char* path = std::getenv("REX_FRAMELOG");
+    if (!path || !path[0]) {
+      return;
+    }
+    file = std::fopen(path, "w");
+    if (file) {
+      std::fputs(
+          "frame_us,draws,render_passes,transfer_passes,pass_resumes,barrier_buf,barrier_img,pass_"
+          "kpixels,submissions\n",
+          file);
+    }
+    frequency = rex::chrono::Clock::QueryHostTickFrequency();
+  }
+  ~SwapFrameLog() {
+    if (file) {
+      std::fclose(file);
+    }
+  }
+
+  void Record() {
+    const uint64_t now = rex::chrono::Clock::QueryHostTickCount();
+    if (last_tick && frequency) {
+      std::fprintf(file, "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+                   static_cast<unsigned long long>((now - last_tick) * 1000000 / frequency),
+                   static_cast<unsigned long long>(rex::graphics::g_frame_draws),
+                   static_cast<unsigned long long>(rex::graphics::g_frame_render_passes),
+                   static_cast<unsigned long long>(rex::graphics::g_frame_transfer_passes),
+                   static_cast<unsigned long long>(rex::graphics::g_frame_pass_resumes),
+                   static_cast<unsigned long long>(rex::graphics::g_frame_barrier_buf),
+                   static_cast<unsigned long long>(rex::graphics::g_frame_barrier_img),
+                   static_cast<unsigned long long>(rex::graphics::g_frame_pass_kpixels),
+                   static_cast<unsigned long long>(rex::graphics::g_frame_submissions));
+      if (++pending >= 32) {
+        pending = 0;
+        std::fflush(file);
+      }
+    }
+    rex::graphics::g_frame_draws = 0;
+    rex::graphics::g_frame_render_passes = 0;
+    rex::graphics::g_frame_transfer_passes = 0;
+    rex::graphics::g_frame_pass_resumes = 0;
+    rex::graphics::g_frame_barrier_buf = 0;
+    rex::graphics::g_frame_barrier_img = 0;
+    rex::graphics::g_frame_pass_kpixels = 0;
+    rex::graphics::g_frame_submissions = 0;
+    last_tick = now;
+  }
+};
+}  // namespace
 
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
 
@@ -954,6 +1031,13 @@ bool CommandProcessor::ExecutePacketType3_INTERRUPT(memory::RingBuffer* reader, 
 bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, uint32_t packet,
                                                   uint32_t count) {
   SCOPE_profile_cpu_f("gpu");
+
+  {
+    static SwapFrameLog frame_log;
+    if (frame_log.file) {
+      frame_log.Record();
+    }
+  }
 
 #ifdef REXGLUE_ENABLE_PERF_COUNTERS
   {

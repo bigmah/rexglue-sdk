@@ -47,6 +47,30 @@
 #include <rex/ui/vulkan/util.h>
 
 // Legacy backend compatibility aliases for shared readback controls.
+namespace rex::graphics {
+// Defined in graphics/command_processor.cpp; reset once per swap by the frame
+// trace. Command-processor thread only.
+extern uint64_t g_frame_draws;
+extern uint64_t g_frame_render_passes;
+extern uint64_t g_frame_transfer_passes;
+extern uint64_t g_frame_pass_resumes;
+extern uint64_t g_frame_barrier_buf;
+extern uint64_t g_frame_barrier_img;
+extern uint64_t g_frame_pass_kpixels;
+
+// Framebuffer of the pass most recently ended, so re-entering the same one can
+// be reported as a split (barrier/compute/query) rather than a real target change.
+static const void* g_last_ended_framebuffer = nullptr;
+extern uint64_t g_frame_submissions;
+}  // namespace rex::graphics
+
+REXCVAR_DEFINE_BOOL(
+    vulkan_narrow_render_area, true, "GPU/Vulkan",
+    "Cover only the region the guest scissor allows with each render pass, instead of the "
+    "whole EDRAM-addressable height of the render target. A tile-based GPU stores and reloads "
+    "everything the render area covers, and render targets are allocated far taller than a "
+    "game draws into.");
+
 REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
                     "Read render-to-texture results on the CPU")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
@@ -3060,6 +3084,8 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
     }
     return false;
   }
+  rex::graphics::g_frame_barrier_buf += pending_barriers_buffer_memory_barriers_.size();
+  rex::graphics::g_frame_barrier_img += pending_barriers_image_memory_barriers_.size();
   EndRenderPass();
   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
     auto it_next = std::next(it);
@@ -3089,19 +3115,46 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
 }
 
 void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-    VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer) {
+    VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
+    VkExtent2D min_render_area) {
   SubmitBarriers(false);
+
+  // A render target is created for the whole height the EDRAM addressing can
+  // reach (1280x2048 for a 1280-wide surface), while a game draws into a small
+  // part of it. The render area is what a tile-based GPU stores and reloads
+  // around a pass, so cover only what the caller can rasterize into. Nothing
+  // outside the guest scissor can be written, and the area is only ever grown
+  // while a pass stays open, so the contents outside it are untouched either way.
+  VkExtent2D render_area;
+  if (!REXCVAR_GET(vulkan_narrow_render_area)) {
+    min_render_area = {};
+  }
+  render_area.width = min_render_area.width
+                          ? std::min(min_render_area.width, framebuffer->host_extent.width)
+                          : framebuffer->host_extent.width;
+  render_area.height = min_render_area.height
+                           ? std::min(min_render_area.height, framebuffer->host_extent.height)
+                           : framebuffer->host_extent.height;
+  if (in_render_pass_ && current_framebuffer_ == framebuffer) {
+    // Growing the area needs a new pass; shrinking it does not, and re-entering
+    // for that would cost more than the smaller area saves.
+    render_area.width = std::max(render_area.width, current_render_area_.width);
+    render_area.height = std::max(render_area.height, current_render_area_.height);
+  }
   const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
   bool use_dynamic_rendering =
       REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
 
+  bool area_covered = render_area.width == current_render_area_.width &&
+                      render_area.height == current_render_area_.height;
   if (use_dynamic_rendering) {
     if (in_render_pass_ && current_framebuffer_ == framebuffer &&
-        current_render_pass_ == VK_NULL_HANDLE) {
+        current_render_pass_ == VK_NULL_HANDLE && area_covered) {
       return;
     }
   } else {
-    if (current_render_pass_ == render_pass && current_framebuffer_ == framebuffer) {
+    if (current_render_pass_ == render_pass && current_framebuffer_ == framebuffer &&
+        area_covered) {
       return;
     }
   }
@@ -3112,11 +3165,13 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     } else {
       deferred_command_buffer_.CmdVkEndRenderPass();
     }
+    rex::graphics::g_last_ended_framebuffer = current_framebuffer_;
     in_render_pass_ = false;
   }
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
+  current_render_area_ = render_area;
 
   if (use_dynamic_rendering) {
     VkRenderingAttachmentInfo color_attachments[xenos::kMaxColorRenderTargets];
@@ -3134,7 +3189,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     rendering_info.flags = 0;
     rendering_info.renderArea.offset.x = 0;
     rendering_info.renderArea.offset.y = 0;
-    rendering_info.renderArea.extent = framebuffer->host_extent;
+    rendering_info.renderArea.extent = render_area;
     rendering_info.layerCount = 1;
     rendering_info.viewMask = 0;
     rendering_info.colorAttachmentCount = color_attachment_count;
@@ -3152,30 +3207,56 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     render_pass_begin_info.renderArea.offset.y = 0;
     // TODO(Triang3l): Actual dirty width / height in the deferred command
     // buffer.
-    render_pass_begin_info.renderArea.extent = framebuffer->host_extent;
+    render_pass_begin_info.renderArea.extent = render_area;
     render_pass_begin_info.clearValueCount = 0;
     render_pass_begin_info.pClearValues = nullptr;
     deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
                                                   VK_SUBPASS_CONTENTS_INLINE);
   }
+  if (rex::graphics::g_last_ended_framebuffer == current_framebuffer_) {
+    ++rex::graphics::g_frame_pass_resumes;
+  }
+  ++rex::graphics::g_frame_render_passes;
+  rex::graphics::g_frame_pass_kpixels += (uint64_t(render_area.width) * render_area.height) >> 10;
   in_render_pass_ = true;
 }
 
 void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
-    VkImageView transfer_dest_view, bool transfer_dest_is_depth) {
+    VkImageView transfer_dest_view, bool transfer_dest_is_depth, VkExtent2D min_render_area) {
   SubmitBarriers(false);
+
+  // Same reasoning as the draw overload: a transfer touches a few EDRAM
+  // rectangles, not the whole addressable height the target is allocated for.
+  if (!REXCVAR_GET(vulkan_narrow_render_area)) {
+    min_render_area = {};
+  }
+  VkExtent2D render_area;
+  render_area.width = min_render_area.width
+                          ? std::min(min_render_area.width, framebuffer->host_extent.width)
+                          : framebuffer->host_extent.width;
+  render_area.height = min_render_area.height
+                           ? std::min(min_render_area.height, framebuffer->host_extent.height)
+                           : framebuffer->host_extent.height;
+  if (in_render_pass_ && current_framebuffer_ == framebuffer) {
+    render_area.width = std::max(render_area.width, current_render_area_.width);
+    render_area.height = std::max(render_area.height, current_render_area_.height);
+  }
   const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
   bool use_dynamic_rendering =
       REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
 
+  // A pass narrowed for a smaller region does not cover what this one writes.
+  bool area_covered = render_area.width == current_render_area_.width &&
+                      render_area.height == current_render_area_.height;
   if (use_dynamic_rendering) {
     if (in_render_pass_ && current_framebuffer_ == framebuffer &&
-        current_render_pass_ == VK_NULL_HANDLE) {
+        current_render_pass_ == VK_NULL_HANDLE && area_covered) {
       return;
     }
   } else {
-    if (current_render_pass_ == render_pass && current_framebuffer_ == framebuffer) {
+    if (current_render_pass_ == render_pass && current_framebuffer_ == framebuffer &&
+        area_covered) {
       return;
     }
   }
@@ -3186,6 +3267,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     } else {
       deferred_command_buffer_.CmdVkEndRenderPass();
     }
+    rex::graphics::g_last_ended_framebuffer = current_framebuffer_;
     in_render_pass_ = false;
   }
 
@@ -3228,7 +3310,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     rendering_info.flags = 0;
     rendering_info.renderArea.offset.x = 0;
     rendering_info.renderArea.offset.y = 0;
-    rendering_info.renderArea.extent = framebuffer->host_extent;
+    rendering_info.renderArea.extent = render_area;
     rendering_info.layerCount = 1;
     rendering_info.viewMask = 0;
     rendering_info.colorAttachmentCount = transfer_dest_is_depth ? 0 : 1;
@@ -3244,12 +3326,18 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     render_pass_begin_info.framebuffer = framebuffer->framebuffer;
     render_pass_begin_info.renderArea.offset.x = 0;
     render_pass_begin_info.renderArea.offset.y = 0;
-    render_pass_begin_info.renderArea.extent = framebuffer->host_extent;
+    render_pass_begin_info.renderArea.extent = render_area;
     render_pass_begin_info.clearValueCount = 0;
     render_pass_begin_info.pClearValues = nullptr;
     deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
                                                   VK_SUBPASS_CONTENTS_INLINE);
   }
+  ++rex::graphics::g_frame_transfer_passes;
+  if (rex::graphics::g_last_ended_framebuffer == current_framebuffer_) {
+    ++rex::graphics::g_frame_pass_resumes;
+  }
+  ++rex::graphics::g_frame_render_passes;
+  rex::graphics::g_frame_pass_kpixels += (uint64_t(render_area.width) * render_area.height) >> 10;
   in_render_pass_ = true;
 }
 
@@ -3263,8 +3351,10 @@ void VulkanCommandProcessor::EndRenderPass() {
   } else {
     deferred_command_buffer_.CmdVkEndRenderPass();
   }
+  rex::graphics::g_last_ended_framebuffer = current_framebuffer_;
   current_render_pass_ = VK_NULL_HANDLE;
   current_framebuffer_ = nullptr;
+  current_render_area_ = {};
   in_render_pass_ = false;
 }
 
@@ -4111,14 +4201,26 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // After all commands that may dispatch, copy or insert barriers, submit
   // the barriers (may end the render pass), and (re)enter the render pass
   // before drawing.
-  SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-      render_target_cache_->last_update_render_pass(),
-      render_target_cache_->last_update_framebuffer());
+  // Nothing can rasterize outside the guest scissor, so the render pass only has
+  // to cover up to its far edge rather than the whole EDRAM-addressable height.
+  VkExtent2D draw_render_area;
+  {
+    draw_util::Scissor draw_scissor;
+    draw_util::GetScissor(regs, draw_scissor);
+    draw_render_area.width = (draw_scissor.offset[0] + draw_scissor.extent[0]) *
+                             texture_cache_->draw_resolution_scale_x();
+    draw_render_area.height = (draw_scissor.offset[1] + draw_scissor.extent[1]) *
+                              texture_cache_->draw_resolution_scale_y();
+  }
+  SubmitBarriersAndEnterRenderTargetCacheRenderPass(render_target_cache_->last_update_render_pass(),
+                                                    render_target_cache_->last_update_framebuffer(),
+                                                    draw_render_area);
 
   // Draw.
   if (primitive_processing_result.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
       shader_32bit_index_dma) {
+    ++rex::graphics::g_frame_draws;
     deferred_command_buffer_.CmdVkDraw(primitive_processing_result.host_draw_vertex_count, 1, 0, 0);
   } else {
     std::pair<VkBuffer, VkDeviceSize> index_buffer;
@@ -4150,6 +4252,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         primitive_processing_result.host_index_format == xenos::IndexFormat::kInt16
             ? VK_INDEX_TYPE_UINT16
             : VK_INDEX_TYPE_UINT32);
+    ++rex::graphics::g_frame_draws;
     deferred_command_buffer_.CmdVkDrawIndexed(primitive_processing_result.host_draw_vertex_count, 1,
                                               0, 0, 0);
   }
@@ -5417,6 +5520,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     {
       ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
           vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
+      ++rex::graphics::g_frame_submissions;
       submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
     }
     if (submit_result != VK_SUCCESS) {

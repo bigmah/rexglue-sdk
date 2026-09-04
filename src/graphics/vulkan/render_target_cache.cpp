@@ -4964,8 +4964,31 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
 
       // Perform the transfers for the render target.
 
+      // Bound the render pass by what these transfers actually write. The
+      // destination is allocated for the whole EDRAM-addressable height, and a
+      // tile-based GPU stores and reloads everything the render area spans.
+      VkExtent2D transfer_render_area = {};
+      for (const Transfer& transfer : current_transfers) {
+        Transfer::Rectangle transfer_area_rectangles[Transfer::kMaxRectanglesWithCutout];
+        uint32_t transfer_area_rectangle_count = transfer.GetRectangles(
+            dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+            transfer_area_rectangles, resolve_clear_rectangle);
+        for (uint32_t j = 0; j < transfer_area_rectangle_count; ++j) {
+          const Transfer::Rectangle& transfer_area_rectangle = transfer_area_rectangles[j];
+          transfer_render_area.width =
+              std::max(transfer_render_area.width,
+                       (transfer_area_rectangle.x_pixels + transfer_area_rectangle.width_pixels) *
+                           draw_resolution_scale_x());
+          transfer_render_area.height =
+              std::max(transfer_render_area.height,
+                       (transfer_area_rectangle.y_pixels + transfer_area_rectangle.height_pixels) *
+                           draw_resolution_scale_y());
+        }
+      }
+
       command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-          transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth);
+          transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth,
+          transfer_render_area);
 
       if (stencil_clear_rectangle_count) {
         VkClearAttachment* stencil_clear_attachment;

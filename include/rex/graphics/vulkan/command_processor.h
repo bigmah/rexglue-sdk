@@ -193,12 +193,18 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   // If not started yet, begins a render pass from the render target cache.
   // Submission must be open.
+  // `min_render_area` is the region the caller may actually rasterize into.
+  // Render targets are allocated for the whole EDRAM-addressable height, which
+  // is far taller than what a game draws into, and a tile-based GPU stores and
+  // reloads everything the render area covers - so covering only what is needed
+  // saves that traffic. Pass a zero extent to cover the whole framebuffer.
   void SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-      VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer);
+      VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
+      VkExtent2D min_render_area = {});
   // Overload for transfer operations with dynamic rendering.
   void SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
-      VkImageView transfer_dest_view, bool transfer_dest_is_depth);
+      VkImageView transfer_dest_view, bool transfer_dest_is_depth, VkExtent2D min_render_area = {});
   // Must be called before doing anything outside the render pass scope,
   // including adding pipeline barriers that are not a part of the render pass
   // scope. Submission must be open.
@@ -794,6 +800,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   VkRenderPass current_render_pass_;
   const VulkanRenderTargetCache::Framebuffer* current_framebuffer_;
   bool in_render_pass_ = false;
+  // Region the open render pass covers; only ever grown while a pass is open.
+  VkExtent2D current_render_area_ = {};
 
   // Currently bound graphics pipeline, either from the pipeline cache (with
   // potentially deferred creation - current_external_graphics_pipeline_ is
