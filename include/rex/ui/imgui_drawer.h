@@ -81,6 +81,9 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
 
   void RenderDrawLists(ImDrawData* data, UIDrawContext& ui_draw_context);
 
+  // Event-driven UI mode still needs to display input feedback before the next
+  // guest frame (and while a setup dialog is blocking guest startup).
+  void RequestRedrawForInput();
   void ClearInput();
   void OnKey(KeyEvent& e, bool is_down);
   void UpdateMousePosition(float x, float y);

@@ -16,6 +16,7 @@
 
 #include <rex/assert.h>
 #include <rex/chrono/clock.h>
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
@@ -23,6 +24,10 @@
 #include <rex/ui/window.h>
 
 #include <imgui.h>
+
+REXCVAR_DEFINE_BOOL(ui_continuous_redraw, true, "UI",
+                    "Continuously redraw ImGui dialogs. Disable to redraw on guest frames and "
+                    "input events instead, avoiding duplicate presentation work.");
 
 namespace rex {
 namespace ui {
@@ -436,7 +441,7 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
   // it now if needed.
   DetachIfLastDialogRemoved();
 
-  if (!dialogs_.empty()) {
+  if (!dialogs_.empty() && REXCVAR_GET(ui_continuous_redraw)) {
     // Repaint (and handle input) continuously if still active. In detached mode
     // there is no presenter; the app drives repaint via its own present loop.
     if (presenter_) {
@@ -489,10 +494,12 @@ ImGuiIO& ImGuiDrawer::GetIO() {
 
 void ImGuiDrawer::OnKeyDown(KeyEvent& e) {
   OnKey(e, true);
+  RequestRedrawForInput();
 }
 
 void ImGuiDrawer::OnKeyUp(KeyEvent& e) {
   OnKey(e, false);
+  RequestRedrawForInput();
 }
 
 void ImGuiDrawer::OnKeyChar(KeyEvent& e) {
@@ -502,6 +509,7 @@ void ImGuiDrawer::OnKeyChar(KeyEvent& e) {
   if (character > 0 && character < 0x10000) {
     io.AddInputCharacter(character);
     e.set_handled(true);
+    RequestRedrawForInput();
   }
 }
 
@@ -531,10 +539,12 @@ void ImGuiDrawer::OnMouseDown(MouseEvent& e) {
       io.MouseDown[button] = true;
     }
   }
+  RequestRedrawForInput();
 }
 
 void ImGuiDrawer::OnMouseMove(MouseEvent& e) {
   SwitchToPhysicalMouseAndUpdateMousePosition(e);
+  RequestRedrawForInput();
 }
 
 void ImGuiDrawer::OnMouseUp(MouseEvent& e) {
@@ -563,12 +573,14 @@ void ImGuiDrawer::OnMouseUp(MouseEvent& e) {
       }
     }
   }
+  RequestRedrawForInput();
 }
 
 void ImGuiDrawer::OnMouseWheel(MouseEvent& e) {
   SwitchToPhysicalMouseAndUpdateMousePosition(e);
   auto& io = GetIO();
   io.MouseWheel += float(e.scroll_y()) / float(MouseEvent::kScrollPerDetent);
+  RequestRedrawForInput();
 }
 
 void ImGuiDrawer::OnTouchEvent(TouchEvent& e) {
@@ -600,6 +612,13 @@ void ImGuiDrawer::OnTouchEvent(TouchEvent& e) {
   } else {
     io.MouseDown[0] = true;
     reset_mouse_position_after_next_frame_ = false;
+  }
+  RequestRedrawForInput();
+}
+
+void ImGuiDrawer::RequestRedrawForInput() {
+  if (presenter_ && !REXCVAR_GET(ui_continuous_redraw)) {
+    presenter_->RequestUIPaintFromUIThread();
   }
 }
 
